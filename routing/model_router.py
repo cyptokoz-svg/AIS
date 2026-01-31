@@ -387,9 +387,15 @@ class ModelRouter:
                 print(f"⚠️ Skipping {model_id}: context too large")
                 continue
             
-            # Log Google usage if selected
-            if self.quota_guard and "google" in full_name and "flash" in full_name:
-                self.quota_guard.log_google_usage(full_name)
+            # Log usage for quota tracking
+            if self.quota_guard:
+                self.quota_guard.log_model_usage(full_name)
+    
+    def log_model_error(self, model_id: str, error: str):
+        """Log an error for a model (e.g., quota exceeded)."""
+        if self.quota_guard:
+            full_name = self.FULL_MODEL_NAMES.get(model_id, model_id)
+            self.quota_guard.log_model_usage(full_name, error=error)
             
             # If budget priority, prefer cheaper models
             if budget_priority and model.tier == ModelTier.FAST:

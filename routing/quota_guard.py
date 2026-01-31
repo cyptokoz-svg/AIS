@@ -55,16 +55,33 @@ class QuotaGuard:
         "openrouter/auto": "openrouter"
     }
     
-    # Google Free Tier Limits (daily)
+    # Fallback chain models (from clawdbot.json)
+    FALLBACK_MODELS = [
+        "kimi-code/kimi-for-coding",
+        "google-antigravity/claude-opus-4-5-thinking",
+        "google-antigravity/gemini-3-pro-high",
+        "google-antigravity/gemini-3-flash",
+        "google/gemini-3-pro-preview",
+        "google/gemini-3-flash-preview",
+        "openrouter/auto"
+    ]
+    
+    # Google Free Tier Limits (daily) - for google:default provider
     GOOGLE_FREE_TIER_LIMITS = {
-        "google/gemini-3-flash-preview": 20,  # Free tier: 20 requests/day
-        "google/gemini-3-pro-preview": 20,     # Free tier: 20 requests/day
-        "google-antigravity/gemini-3-flash": 20,
-        "google-antigravity/gemini-3-pro-high": 20
+        "google/gemini-3-flash-preview": 20,
+        "google/gemini-3-pro-preview": 20
     }
     
-    # Usage tracking file
+    # Google Antigravity OAuth limits (estimates, need verification)
+    GOOGLE_ANTIGRAVITY_LIMITS = {
+        "google-antigravity/claude-opus-4-5-thinking": 100,  # Paid tier, high limit
+        "google-antigravity/gemini-3-pro-high": 1000,
+        "google-antigravity/gemini-3-flash": 1000
+    }
+    
+    # Usage tracking files
     USAGE_LOG_FILE = "/home/ubuntu/.clawdbot/google_usage_log.json"
+    UNIFIED_USAGE_FILE = "/home/ubuntu/.clawdbot/fallback_models_usage.json"
         "google-antigravity/gemini-3-flash": "google-antigravity",
         "google/gemini-3-pro-preview": "google",
         "google/gemini-3-flash-preview": "google",
@@ -89,25 +106,73 @@ class QuotaGuard:
         self._init_usage_log()
     
     def _init_usage_log(self):
-        """Initialize Google API usage tracking."""
+        """Initialize unified usage tracking for all fallback models."""
         import os
+        
+        # Initialize Google specific log
         if not os.path.exists(self.USAGE_LOG_FILE):
             with open(self.USAGE_LOG_FILE, 'w') as f:
                 json.dump({
                     "google_flash": {"date": "", "count": 0},
                     "google_pro": {"date": "", "count": 0}
                 }, f)
+        
+        # Initialize unified fallback models log
+        if not os.path.exists(self.UNIFIED_USAGE_FILE):
+            default_usage = {}
+            for model in self.FALLBACK_MODELS:
+                default_usage[model] = {
+                    "date": "",
+                    "count": 0,
+                    "last_error": None,
+                    "status": "unknown"
+                }
+            with open(self.UNIFIED_USAGE_FILE, 'w') as f:
+                json.dump(default_usage, f, indent=2)
     
     def _get_today(self) -> str:
         """Get today's date string."""
         from datetime import datetime
         return datetime.now().strftime("%Y-%m-%d")
     
-    def log_google_usage(self, model_id: str):
-        """Log a Google API usage."""
-        if "google" not in model_id or "flash" not in model_id:
+    def log_model_usage(self, model_id: str, error: Optional[str] = None):
+        """Log usage for any fallback model."""
+        if model_id not in self.FALLBACK_MODELS:
             return
         
+        try:
+            # Update unified log
+            if os.path.exists(self.UNIFIED_USAGE_FILE):
+                with open(self.UNIFIED_USAGE_FILE, 'r') as f:
+                    usage = json.load(f)
+            else:
+                usage = {}
+            
+            today = self._get_today()
+            
+            if model_id not in usage:
+                usage[model_id] = {"date": "", "count": 0, "last_error": None, "status": "unknown"}
+            
+            # Reset if new day
+            if usage[model_id]["date"] != today:
+                usage[model_id] = {"date": today, "count": 1, "last_error": error, "status": "active"}
+            else:
+                usage[model_id]["count"] += 1
+                if error:
+                    usage[model_id]["last_error"] = error
+            
+            with open(self.UNIFIED_USAGE_FILE, 'w') as f:
+                json.dump(usage, f, indent=2)
+            
+            # Also log Google specific
+            if "google" in model_id and "flash" in model_id:
+                self._log_google_specific(model_id)
+                
+        except Exception as e:
+            print(f"Warning: Could not log usage: {e}")
+    
+    def _log_google_specific(self, model_id: str):
+        """Log Google-specific usage."""
         try:
             with open(self.USAGE_LOG_FILE, 'r') as f:
                 usage = json.load(f)
@@ -122,9 +187,13 @@ class QuotaGuard:
             
             with open(self.USAGE_LOG_FILE, 'w') as f:
                 json.dump(usage, f)
-                
-        except Exception as e:
-            print(f"Warning: Could not log usage: {e}")
+        except Exception:
+            pass
+    
+    # Backward compatibility
+    def log_google_usage(self, model_id: str):
+        """Legacy method - redirects to unified logging."""
+        self.log_model_usage(model_id)
     
     def get_google_remaining(self, model_id: str) -> int:
         """Get remaining quota for Google free tier."""
@@ -179,6 +248,29 @@ class QuotaGuard:
                 error_message=f"Unknown provider for {model_id}"
             )
         
+        # Check unified usage log for recent errors
+        try:
+            if os.path.exists(self.UNIFIED_USAGE_FILE):
+                with open(self.UNIFIED_USAGE_FILE, 'r') as f:
+                    usage = json.load(f)
+                
+                model_usage = usage.get(model_id, {})
+                today = self._get_today()
+                
+                # Check for recent errors
+                if model_usage.get("last_error") and model_usage.get("date") == today:
+                    if "429" in model_usage["last_error"] or "quota" in model_usage["last_error"].lower():
+                        return ModelQuota(
+                            model_id=model_id,
+                            status=QuotaStatus.EXHAUSTED,
+                            percent_remaining=0.0,
+                            estimated_calls_remaining=0,
+                            last_checked=time.time(),
+                            error_message=f"Recent quota error: {model_usage['last_error'][:50]}"
+                        )
+        except Exception:
+            pass
+        
         # Check Google free tier limits
         if provider == "google" and model_id in self.GOOGLE_FREE_TIER_LIMITS:
             remaining = self.get_google_remaining(model_id)
@@ -216,6 +308,99 @@ class QuotaGuard:
                     status=QuotaStatus.HEALTHY,
                     percent_remaining=percent,
                     estimated_calls_remaining=remaining,
+                    last_checked=time.time()
+                )
+        
+        # Check Google Antigravity (OAuth) models
+        if provider == "google-antigravity" and model_id in self.GOOGLE_ANTIGRAVITY_LIMITS:
+            limit = self.GOOGLE_ANTIGRAVITY_LIMITS[model_id]
+            # These are paid tiers, assume healthy but track usage
+            try:
+                with open(self.UNIFIED_USAGE_FILE, 'r') as f:
+                    usage = json.load(f)
+                model_usage = usage.get(model_id, {})
+                today = self._get_today()
+                
+                if model_usage.get("date") == today:
+                    used = model_usage.get("count", 0)
+                    remaining = limit - used
+                    percent = (remaining / limit) * 100
+                    
+                    if remaining <= 0:
+                        return ModelQuota(
+                            model_id=model_id,
+                            status=QuotaStatus.EXHAUSTED,
+                            percent_remaining=0.0,
+                            estimated_calls_remaining=0,
+                            last_checked=time.time(),
+                            error_message=f"Antigravity daily limit reached: {used}/{limit}"
+                        )
+                    elif remaining <= limit * 0.2:  # 20% remaining
+                        return ModelQuota(
+                            model_id=model_id,
+                            status=QuotaStatus.WARNING,
+                            percent_remaining=percent,
+                            estimated_calls_remaining=remaining,
+                            last_checked=time.time()
+                        )
+                    else:
+                        return ModelQuota(
+                            model_id=model_id,
+                            status=QuotaStatus.HEALTHY,
+                            percent_remaining=percent,
+                            estimated_calls_remaining=remaining,
+                            last_checked=time.time()
+                        )
+                else:
+                    # New day, full quota
+                    return ModelQuota(
+                        model_id=model_id,
+                        status=QuotaStatus.HEALTHY,
+                        percent_remaining=100.0,
+                        estimated_calls_remaining=limit,
+                        last_checked=time.time()
+                    )
+            except Exception:
+                # Assume healthy if can't read log
+                return ModelQuota(
+                    model_id=model_id,
+                    status=QuotaStatus.HEALTHY,
+                    percent_remaining=100.0,
+                    estimated_calls_remaining=limit,
+                    last_checked=time.time()
+                )
+        
+        # Kimi Code and OpenRouter - API key based, no hard daily limits
+        # Just check for recent errors
+        if provider in ["kimi-code", "openrouter"]:
+            try:
+                with open(self.UNIFIED_USAGE_FILE, 'r') as f:
+                    usage = json.load(f)
+                model_usage = usage.get(model_id, {})
+                
+                if model_usage.get("last_error"):
+                    return ModelQuota(
+                        model_id=model_id,
+                        status=QuotaStatus.WARNING,
+                        percent_remaining=50.0,  # Unknown, but had errors
+                        estimated_calls_remaining=5000,
+                        last_checked=time.time(),
+                        error_message=f"Recent error: {model_usage['last_error'][:50]}"
+                    )
+                else:
+                    return ModelQuota(
+                        model_id=model_id,
+                        status=QuotaStatus.HEALTHY,
+                        percent_remaining=100.0,
+                        estimated_calls_remaining=10000,
+                        last_checked=time.time()
+                    )
+            except Exception:
+                return ModelQuota(
+                    model_id=model_id,
+                    status=QuotaStatus.HEALTHY,
+                    percent_remaining=100.0,
+                    estimated_calls_remaining=10000,
                     last_checked=time.time()
                 )
         

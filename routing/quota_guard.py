@@ -41,6 +41,7 @@ class ModelQuota:
 class QuotaGuard:
     """
     Monitors model quotas and prevents switching to unavailable models.
+    Includes real-time Google API free tier tracking.
     """
     
     # Model to provider mapping for quota checks
@@ -48,6 +49,22 @@ class QuotaGuard:
         "kimi-code/kimi-for-coding": "kimi-code",
         "google-antigravity/claude-opus-4-5-thinking": "google-antigravity",
         "google-antigravity/gemini-3-pro-high": "google-antigravity",
+        "google-antigravity/gemini-3-flash": "google-antigravity",
+        "google/gemini-3-pro-preview": "google",
+        "google/gemini-3-flash-preview": "google",
+        "openrouter/auto": "openrouter"
+    }
+    
+    # Google Free Tier Limits (daily)
+    GOOGLE_FREE_TIER_LIMITS = {
+        "google/gemini-3-flash-preview": 20,  # Free tier: 20 requests/day
+        "google/gemini-3-pro-preview": 20,     # Free tier: 20 requests/day
+        "google-antigravity/gemini-3-flash": 20,
+        "google-antigravity/gemini-3-pro-high": 20
+    }
+    
+    # Usage tracking file
+    USAGE_LOG_FILE = "/home/ubuntu/.clawdbot/google_usage_log.json"
         "google-antigravity/gemini-3-flash": "google-antigravity",
         "google/gemini-3-pro-preview": "google",
         "google/gemini-3-flash-preview": "google",
@@ -69,6 +86,67 @@ class QuotaGuard:
         self.cache: Dict[str, ModelQuota] = {}
         self.cache_ttl = cache_ttl_seconds
         self.last_check: Dict[str, float] = {}
+        self._init_usage_log()
+    
+    def _init_usage_log(self):
+        """Initialize Google API usage tracking."""
+        import os
+        if not os.path.exists(self.USAGE_LOG_FILE):
+            with open(self.USAGE_LOG_FILE, 'w') as f:
+                json.dump({
+                    "google_flash": {"date": "", "count": 0},
+                    "google_pro": {"date": "", "count": 0}
+                }, f)
+    
+    def _get_today(self) -> str:
+        """Get today's date string."""
+        from datetime import datetime
+        return datetime.now().strftime("%Y-%m-%d")
+    
+    def log_google_usage(self, model_id: str):
+        """Log a Google API usage."""
+        if "google" not in model_id or "flash" not in model_id:
+            return
+        
+        try:
+            with open(self.USAGE_LOG_FILE, 'r') as f:
+                usage = json.load(f)
+            
+            today = self._get_today()
+            key = "google_flash"
+            
+            if usage[key]["date"] != today:
+                usage[key] = {"date": today, "count": 1}
+            else:
+                usage[key]["count"] += 1
+            
+            with open(self.USAGE_LOG_FILE, 'w') as f:
+                json.dump(usage, f)
+                
+        except Exception as e:
+            print(f"Warning: Could not log usage: {e}")
+    
+    def get_google_remaining(self, model_id: str) -> int:
+        """Get remaining quota for Google free tier."""
+        if model_id not in self.GOOGLE_FREE_TIER_LIMITS:
+            return 999999  # Unlimited
+        
+        try:
+            with open(self.USAGE_LOG_FILE, 'r') as f:
+                usage = json.load(f)
+            
+            today = self._get_today()
+            key = "google_flash"
+            
+            if usage[key]["date"] != today:
+                return self.GOOGLE_FREE_TIER_LIMITS[model_id]
+            
+            used = usage[key]["count"]
+            limit = self.GOOGLE_FREE_TIER_LIMITS[model_id]
+            return max(0, limit - used)
+            
+        except Exception:
+            return self.GOOGLE_FREE_TIER_LIMITS.get(model_id, 20)
     
     def check_quota(self, model_id: str, force_refresh: bool = False) -> ModelQuota:
         """
@@ -88,7 +166,7 @@ class QuotaGuard:
         return quota
     
     def _do_check(self, model_id: str) -> ModelQuota:
-        """Actually check quota via system commands."""
+        """Actually check quota via system commands and usage tracking."""
         provider = self.MODEL_PROVIDERS.get(model_id)
         
         if not provider:
@@ -100,6 +178,46 @@ class QuotaGuard:
                 last_checked=time.time(),
                 error_message=f"Unknown provider for {model_id}"
             )
+        
+        # Check Google free tier limits
+        if provider == "google" and model_id in self.GOOGLE_FREE_TIER_LIMITS:
+            remaining = self.get_google_remaining(model_id)
+            limit = self.GOOGLE_FREE_TIER_LIMITS[model_id]
+            percent = (remaining / limit) * 100 if limit > 0 else 0
+            
+            if remaining <= 0:
+                return ModelQuota(
+                    model_id=model_id,
+                    status=QuotaStatus.EXHAUSTED,
+                    percent_remaining=0.0,
+                    estimated_calls_remaining=0,
+                    last_checked=time.time(),
+                    error_message=f"Google free tier exhausted: {remaining}/{limit} remaining"
+                )
+            elif remaining <= 5:
+                return ModelQuota(
+                    model_id=model_id,
+                    status=QuotaStatus.CRITICAL,
+                    percent_remaining=percent,
+                    estimated_calls_remaining=remaining,
+                    last_checked=time.time()
+                )
+            elif remaining <= 10:
+                return ModelQuota(
+                    model_id=model_id,
+                    status=QuotaStatus.WARNING,
+                    percent_remaining=percent,
+                    estimated_calls_remaining=remaining,
+                    last_checked=time.time()
+                )
+            else:
+                return ModelQuota(
+                    model_id=model_id,
+                    status=QuotaStatus.HEALTHY,
+                    percent_remaining=percent,
+                    estimated_calls_remaining=remaining,
+                    last_checked=time.time()
+                )
         
         try:
             # Try to get status via clawdbot

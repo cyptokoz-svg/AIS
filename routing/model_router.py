@@ -236,12 +236,21 @@ class ModelRouter:
         "openrouter": "openrouter/auto"
     }
     
-    def __init__(self, config_path: Optional[str] = None):
+    def __init__(self, config_path: Optional[str] = None, enable_quota_guard: bool = True):
         self.config_path = Path(config_path) if config_path else Path("./model_router_config.json")
         self.usage_history: List[Dict] = []
         self.configured_models: set = set()
         self._load_clawdbot_config()
         self.load_config()
+        
+        # Initialize quota guard
+        self.quota_guard = None
+        if enable_quota_guard:
+            try:
+                from quota_guard import QuotaGuard
+                self.quota_guard = QuotaGuard()
+            except ImportError:
+                print("Warning: quota_guard not available, quota checks disabled")
     
     def _load_clawdbot_config(self):
         """Load and validate clawdbot configuration."""
@@ -351,13 +360,23 @@ class ModelRouter:
     
     def _select_model(self, candidates: List[str], context_tokens: int,
                       budget_priority: bool) -> str:
-        """Select best model from candidates with safety checks."""
+        """Select best model from candidates with safety and quota checks."""
         for model_id in candidates:
             # Safety check first
             is_safe, reason = self._is_model_safe(model_id)
             if not is_safe:
                 print(f"⚠️ Skipping {model_id}: {reason}")
                 continue
+            
+            # Quota check
+            if self.quota_guard:
+                full_name = self.FULL_MODEL_NAMES.get(model_id, model_id)
+                quota = self.quota_guard.check_quota(full_name)
+                if quota.status.value in ["exhausted", "unconfigured"]:
+                    print(f"🚫 Skipping {model_id}: quota {quota.status.value}")
+                    continue
+                elif quota.status.value in ["critical", "warning"]:
+                    print(f"⚠️ {model_id} quota low: {quota.estimated_calls_remaining} remaining")
             
             model = ModelRegistry.get(model_id)
             if not model:
@@ -368,22 +387,34 @@ class ModelRouter:
                 print(f"⚠️ Skipping {model_id}: context too large")
                 continue
             
+            # Log Google usage if selected
+            if self.quota_guard and "google" in full_name and "flash" in full_name:
+                self.quota_guard.log_google_usage(full_name)
+            
             # If budget priority, prefer cheaper models
             if budget_priority and model.tier == ModelTier.FAST:
                 return model_id
             
             return model_id
         
-        # Emergency fallback - must be safe
-        for emergency in ["gemini-flash", "openrouter"]:
+        # Emergency fallback - must be safe and have quota
+        for emergency in ["kimi-code", "openrouter", "gemini-flash"]:
             is_safe, _ = self._is_model_safe(emergency)
-            if is_safe:
-                print(f"🆘 Emergency fallback to {emergency}")
-                return emergency
+            if not is_safe:
+                continue
+            
+            if self.quota_guard:
+                full_name = self.FULL_MODEL_NAMES.get(emergency, emergency)
+                quota = self.quota_guard.check_quota(full_name)
+                if quota.status.value in ["exhausted", "unconfigured"]:
+                    continue
+            
+            print(f"🆘 Emergency fallback to {emergency}")
+            return emergency
         
         # Absolute fallback
-        print("🆘 CRITICAL: No safe models found, using gemini-flash")
-        return "gemini-flash"
+        print("🆘 CRITICAL: No safe models found, using kimi-code")
+        return "kimi-code"
     
     def _create_decision(self, model: ModelConfig, task: TaskType,
                         prompt: str, reason: str, confidence: float,

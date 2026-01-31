@@ -1,0 +1,48 @@
+{
+  "schema_version": "0.1.0",
+  "description": "Agent State Machine Configuration for JARVIS-Koz",
+  "created_by": "JARVIS-Koz",
+  "owner": "Sir Koz (cyptokoz-svg)",
+  
+  "sharding_rules": {
+    "trading": {
+      "keywords": ["BTC", "ETH", "trade", "position", "PnL", "edge", "OBI", "Polymarket"],
+      "priority": 10,
+      "refresh_interval_minutes": 5
+    },
+    "social": {
+      "keywords": ["Moltbook", "Molty", "post", "comment", "follow", "karma"],
+      "priority": 7,
+      "refresh_interval_minutes": 15
+    },
+    "infrastructure": {
+      "keywords": ["model", "API", "config", "token", "cost", "schema", "sync"],
+      "priority": 9,
+      "refresh_interval_minutes": 30
+    },
+    "security": {
+      "keywords": ["key", "secret", "credential", "auth", "permission"],
+      "priority": 10,
+      "refresh_interval_minutes": 60
+    }
+  },
+  
+  "distill_schedule": {
+    "daily_logs": "memory/YYYY-MM-DD.md",
+    "auto_distill": true,
+    "distill_at_hour": 3,
+    "retention_days": 7
+  },
+  
+  "compression": {
+    "max_shard_size_tokens": 2000,
+    "enable_deduplication": true,
+    "reference_resolution": "lazy"
+  },
+  
+  "cross_agent_compat": {
+    "export_format": "json",
+    "supported_frameworks": ["Clawdbot", "OpenClaw", "Moltbook-Agent"],
+    "namespace": "jarvis-koz"
+  }
+}
